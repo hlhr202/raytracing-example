@@ -341,9 +341,9 @@ fn main() {
             // to fixed x.xx
             (100.0 * y as f64 / (h as f64 - 1.0) * 100.0).round() / 100.0
         );
+        let mut xis = [0, 0, (y * y * y) as u16];
         for x in 0..w {
             // Loop over image width
-            let mut xis = [0, 0, (y * y * y) as u16];
             for sy in 0..2 {
                 let i = (h - y - 1) * w + x;
                 for sx in 0..2 {
