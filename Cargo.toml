@@ -5,3 +5,5 @@ edition = "2021"
 
 [dependencies]
 libc = "0.2"
+num_cpus = "1.16.0"
+rayon = "1.10.0"

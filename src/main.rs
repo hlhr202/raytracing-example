@@ -1,7 +1,11 @@
+#![allow(clippy::needless_range_loop)]
+
 use std::{
     io::Write,
     ops::{Add, Mul, Rem, Sub},
 };
+
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 #[derive(Debug, Clone, Copy)]
 struct Vector3D {
@@ -246,6 +250,11 @@ fn radiance(r: Ray, depth: i32, xi: *mut u16, spheres: &[Sphere]) -> Vector3D {
 }
 
 fn main() {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_cpus::get())
+        .build_global()
+        .unwrap();
+
     let spheres = [
         Sphere::new(
             1e5,
@@ -328,53 +337,64 @@ fn main() {
 
     let cx = Vector3D::new(w as f64 * 0.5135 / h as f64, 0.0, 0.0);
     let cy = (cx % cam.d).norm() * 0.5135;
-    let mut r;
     let mut c = vec![Vector3D::new(0.0, 0.0, 0.0); w * h];
 
-    println!("sample: {}", n_samples * 4);
+    let y_counter = std::sync::atomic::AtomicUsize::new(0);
 
-    for y in 0..h {
-        // Loop over image height
-        eprintln!(
-            "Rendering ({} spp) {}%",
-            n_samples * 4,
-            // to fixed x.xx
-            (100.0 * y as f64 / (h as f64 - 1.0) * 100.0).round() / 100.0
-        );
-        let mut xis = [0, 0, (y * y * y) as u16];
-        for x in 0..w {
-            // Loop over image width
-            for sy in 0..2 {
-                let i = (h - y - 1) * w + x;
-                for sx in 0..2 {
-                    r = Vector3D::new(0.0, 0.0, 0.0);
-                    for _ in 0..n_samples {
-                        let r1 = 2.0 * unsafe { libc::erand48(xis.as_mut_ptr()) };
-                        let r2 = 2.0 * unsafe { libc::erand48(xis.as_mut_ptr()) };
-                        let dx = if r1 < 1.0 {
-                            r1.sqrt() - 1.0
-                        } else {
-                            1.0 - (2.0 - r1).sqrt()
-                        };
-                        let dy = if r2 < 1.0 {
-                            r2.sqrt() - 1.0
-                        } else {
-                            1.0 - (2.0 - r2).sqrt()
-                        };
-                        let mut d = cx
-                            * (((sx as f64 + 0.5 + dx) / 2.0 + x as f64) / w as f64 - 0.5)
-                            + cy * (((sy as f64 + 0.5 + dy) / 2.0 + y as f64) / h as f64 - 0.5)
-                            + cam.d;
-                        r = r + radiance(
-                            Ray::new(cam.o + d * 140.0, d.norm()),
-                            0,
-                            xis.as_mut_ptr(),
-                            &spheres,
-                        ) * (1.0 / n_samples as f64);
+    let iter_over_heights = (0..h).collect::<Vec<_>>();
+    let color_over_heights = iter_over_heights
+        .par_iter()
+        .map(|y| {
+            let old_y_counter = y_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            println!(
+                "Rendering ({} spp) {}%",
+                n_samples * 4,
+                // to fixed x.xx
+                (100.0 * old_y_counter as f64 / (h as f64 - 1.0) * 100.0).round() / 100.0
+            );
+            let mut xis = [0, 0, (y * y * y) as u16];
+            let mut c = vec![Vector3D::new(0.0, 0.0, 0.0); w];
+            for x in 0..w {
+                for sy in 0..2 {
+                    for sx in 0..2 {
+                        let mut r = Vector3D::new(0.0, 0.0, 0.0);
+                        for _ in 0..n_samples {
+                            let r1 = 2.0 * unsafe { libc::erand48(xis.as_mut_ptr()) };
+                            let r2 = 2.0 * unsafe { libc::erand48(xis.as_mut_ptr()) };
+                            let dx = if r1 < 1.0 {
+                                r1.sqrt() - 1.0
+                            } else {
+                                1.0 - (2.0 - r1).sqrt()
+                            };
+                            let dy = if r2 < 1.0 {
+                                r2.sqrt() - 1.0
+                            } else {
+                                1.0 - (2.0 - r2).sqrt()
+                            };
+                            let mut d = cx
+                                * (((sx as f64 + 0.5 + dx) / 2.0 + x as f64) / w as f64 - 0.5)
+                                + cy * (((sy as f64 + 0.5 + dy) / 2.0 + *y as f64) / h as f64
+                                    - 0.5)
+                                + cam.d;
+                            r = r + radiance(
+                                Ray::new(cam.o + d * 140.0, d.norm()),
+                                0,
+                                xis.as_mut_ptr(),
+                                &spheres,
+                            ) * (1.0 / n_samples as f64);
+                        }
+                        c[x] = c[x] + Vector3D::new(clamp(r.x), clamp(r.y), clamp(r.z)) * 0.25;
                     }
-                    c[i] = c[i] + Vector3D::new(clamp(r.x), clamp(r.y), clamp(r.z)) * 0.25;
                 }
             }
+            c
+        })
+        .collect::<Vec<_>>();
+
+    for (y, color) in iter_over_heights.iter().zip(color_over_heights.into_iter()) {
+        for x in 0..w {
+            let i = (h - y - 1) * w + x;
+            c[i] = c[i] + color[x];
         }
     }
 
